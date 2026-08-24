@@ -10,6 +10,7 @@ export interface Env {
 	EBAY_CERT_ID?: string;
 	EBAY_CAMPAIGN_ID?: string;
 	ALLOWED_ORIGIN?: string;
+	INTERNAL_API_TOKEN?: string;
 }
 
 function corsHeaders(origin: string): HeadersInit {
@@ -30,6 +31,11 @@ export default {
 		}
 
 		const url = new URL(request.url);
+
+		if (url.pathname === '/price') {
+			return handlePrice(request, url, env);
+		}
+
 		if (url.pathname !== '/search') {
 			return new Response('Not found', { status: 404, headers });
 		}
@@ -61,3 +67,42 @@ export default {
 		});
 	},
 } satisfies ExportedHandler<Env>;
+
+/**
+ * Prix courant d'un item précis (ASIN Amazon / legacy item id eBay). Route
+ * serveur-à-serveur uniquement (job de suivi de prix Supabase) : pas de CORS
+ * navigateur, protégée par un jeton partagé plutôt que restreinte par origine.
+ */
+async function handlePrice(request: Request, url: URL, env: Env): Promise<Response> {
+	const jsonHeaders = { 'Content-Type': 'application/json' };
+
+	const token = request.headers.get('X-Internal-Token');
+	if (!env.INTERNAL_API_TOKEN || token !== env.INTERNAL_API_TOKEN) {
+		return new Response(JSON.stringify({ error: 'Unauthorized' }), { status: 401, headers: jsonHeaders });
+	}
+
+	const source = url.searchParams.get('source');
+	const itemId = url.searchParams.get('itemId')?.trim();
+	if (source !== 'amazon' && source !== 'ebay') {
+		return new Response(JSON.stringify({ error: "Paramètre 'source' invalide (amazon|ebay attendu)" }), {
+			status: 400,
+			headers: jsonHeaders,
+		});
+	}
+	if (!itemId) {
+		return new Response(JSON.stringify({ error: "Paramètre 'itemId' manquant" }), { status: 400, headers: jsonHeaders });
+	}
+
+	const client = source === 'amazon' ? new AmazonSource(env) : new EbaySource(env);
+	const mock = source === 'amazon' ? !env.AMAZON_ACCESS_KEY || !env.AMAZON_SECRET_KEY : !env.EBAY_APP_ID || !env.EBAY_CERT_ID;
+
+	try {
+		const result = await client.getPrice(itemId);
+		if (!result) {
+			return new Response(JSON.stringify({ error: 'Item not found or delisted' }), { status: 404, headers: jsonHeaders });
+		}
+		return new Response(JSON.stringify({ source, itemId, mock, ...result }), { headers: jsonHeaders });
+	} catch (err) {
+		return new Response(JSON.stringify({ error: String(err) }), { status: 502, headers: jsonHeaders });
+	}
+}

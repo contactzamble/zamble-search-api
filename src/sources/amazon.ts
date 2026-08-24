@@ -1,4 +1,4 @@
-import { type Listing, type Source, seededRandom, titleCase } from './base';
+import { type ItemPrice, type Listing, type Source, seededRandom, titleCase } from './base';
 
 /**
  * Client Amazon Product Advertising API (PA API v5), requête SearchItems
@@ -16,7 +16,10 @@ import { type Listing, type Source, seededRandom, titleCase } from './base';
 const HOST = 'webservices.amazon.fr';
 const REGION = 'eu-west-1';
 const SERVICE = 'ProductAdvertisingAPI';
-const TARGET = 'com.amazon.paapi5.v1.ProductAdvertisingAPIv1.SearchItems';
+const SEARCH_ITEMS_PATH = '/paapi5/searchitems';
+const SEARCH_ITEMS_TARGET = 'com.amazon.paapi5.v1.ProductAdvertisingAPIv1.SearchItems';
+const GET_ITEMS_PATH = '/paapi5/getitems';
+const GET_ITEMS_TARGET = 'com.amazon.paapi5.v1.ProductAdvertisingAPIv1.GetItems';
 
 interface PaApiItem {
 	ASIN: string;
@@ -50,8 +53,8 @@ export class AmazonSource implements Source {
 			Resources: ['ItemInfo.Title', 'Offers.Listings.Price'],
 		});
 
-		const { headers, body } = await this.signRequest(payload);
-		const response = await fetch(`https://${HOST}/paapi5/searchitems`, { method: 'POST', headers, body });
+		const { headers, body } = await this.signRequest(payload, SEARCH_ITEMS_PATH, SEARCH_ITEMS_TARGET);
+		const response = await fetch(`https://${HOST}${SEARCH_ITEMS_PATH}`, { method: 'POST', headers, body });
 
 		if (!response.ok) {
 			throw new Error(`Amazon PA API a répondu ${response.status}`);
@@ -73,7 +76,56 @@ export class AmazonSource implements Source {
 			});
 	}
 
-	private async signRequest(payload: string): Promise<{ headers: Record<string, string>; body: string }> {
+	/**
+	 * Prix courant d'un ASIN précis, via l'opération GetItems (plus adaptée
+	 * qu'une recherche par mot-clé pour re-cibler le même produit dans le
+	 * temps — utilisé par le job de suivi de prix).
+	 */
+	async getPrice(itemId: string): Promise<ItemPrice | null> {
+		if (this.mock) return this.getPriceMock(itemId);
+
+		const payload = JSON.stringify({
+			ItemIds: [itemId],
+			PartnerTag: this.partnerTag,
+			PartnerType: 'Associates',
+			Marketplace: 'www.amazon.fr',
+			Resources: ['Offers.Listings.Price'],
+		});
+
+		const { headers, body } = await this.signRequest(payload, GET_ITEMS_PATH, GET_ITEMS_TARGET);
+		const response = await fetch(`https://${HOST}${GET_ITEMS_PATH}`, { method: 'POST', headers, body });
+
+		if (!response.ok) {
+			throw new Error(`Amazon PA API (GetItems) a répondu ${response.status}`);
+		}
+
+		const data = (await response.json()) as { ItemsResult?: { Items?: PaApiItem[] } };
+		const item = data.ItemsResult?.Items?.[0];
+		const amount = item?.Offers?.Listings?.[0]?.Price?.Amount;
+		if (amount == null) return null;
+
+		const url = `https://www.amazon.fr/dp/${itemId}`;
+		return {
+			price: amount,
+			url,
+			affiliateUrl: `${url}?tag=${this.partnerTag || 'TAG_MANQUANT'}`,
+			available: true,
+		};
+	}
+
+	private getPriceMock(itemId: string): ItemPrice {
+		const rand = seededRandom(`amazon-price:${itemId}`);
+		const price = Math.round((40 + rand() * 360) * 100) / 100;
+		const url = `https://www.amazon.fr/dp/${itemId}`;
+		return {
+			price,
+			url,
+			affiliateUrl: `${url}?tag=${this.partnerTag || 'TAG_MANQUANT'}`,
+			available: true,
+		};
+	}
+
+	private async signRequest(payload: string, path: string, target: string): Promise<{ headers: Record<string, string>; body: string }> {
 		const amzDate = new Date().toISOString().replace(/[:-]|\.\d{3}/g, '');
 		const dateStamp = amzDate.slice(0, 8);
 
@@ -82,11 +134,11 @@ export class AmazonSource implements Source {
 			`content-type:application/json; charset=utf-8\n` +
 			`host:${HOST}\n` +
 			`x-amz-date:${amzDate}\n` +
-			`x-amz-target:${TARGET}\n`;
+			`x-amz-target:${target}\n`;
 		const signedHeaders = 'content-encoding;content-type;host;x-amz-date;x-amz-target';
 		const payloadHash = await sha256Hex(payload);
 
-		const canonicalRequest = `POST\n/paapi5/searchitems\n\n${canonicalHeaders}\n${signedHeaders}\n${payloadHash}`;
+		const canonicalRequest = `POST\n${path}\n\n${canonicalHeaders}\n${signedHeaders}\n${payloadHash}`;
 
 		const credentialScope = `${dateStamp}/${REGION}/${SERVICE}/aws4_request`;
 		const stringToSign = `AWS4-HMAC-SHA256\n${amzDate}\n${credentialScope}\n${await sha256Hex(canonicalRequest)}`;
@@ -103,7 +155,7 @@ export class AmazonSource implements Source {
 				'content-type': 'application/json; charset=utf-8',
 				host: HOST,
 				'x-amz-date': amzDate,
-				'x-amz-target': TARGET,
+				'x-amz-target': target,
 				authorization,
 			},
 			body: payload,
