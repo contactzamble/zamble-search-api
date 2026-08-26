@@ -1,6 +1,8 @@
 import { AmazonSource } from './sources/amazon';
 import { EbaySource } from './sources/ebay';
+import { VisionSource } from './sources/vision';
 import type { Listing } from './sources/base';
+import { DEFAULT_VISION_QUOTA, incrementQuota, readQuota } from './quota';
 
 export interface Env {
 	AMAZON_ACCESS_KEY?: string;
@@ -9,12 +11,19 @@ export interface Env {
 	EBAY_APP_ID?: string;
 	EBAY_CERT_ID?: string;
 	EBAY_CAMPAIGN_ID?: string;
+	GOOGLE_VISION_API_KEY?: string;
+	VISION_MONTHLY_QUOTA?: string;
+	VISION_QUOTA_KV: KVNamespace;
 	/** @deprecated remplacé par ALLOWED_ORIGINS (liste), gardé pour compat descendante */
 	ALLOWED_ORIGIN?: string;
 	/** Liste blanche d'origines autorisées en CORS, séparées par des virgules */
 	ALLOWED_ORIGINS?: string;
 	INTERNAL_API_TOKEN?: string;
 }
+
+// Taille max acceptée pour une image encodée en base64 (~2 Mo binaire réel) —
+// borne à la fois l'abus d'upload et la taille de la requête vers Vision.
+const MAX_IMAGE_BASE64_LENGTH = 2_800_000;
 
 const DEFAULT_ORIGIN = 'https://zamble.fr';
 
@@ -31,7 +40,7 @@ function resolveAllowedOrigins(env: Env): string[] {
 function corsHeaders(origin: string): HeadersInit {
 	return {
 		'Access-Control-Allow-Origin': origin,
-		'Access-Control-Allow-Methods': 'GET, OPTIONS',
+		'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
 		'Access-Control-Allow-Headers': 'Content-Type',
 		Vary: 'Origin',
 	};
@@ -52,6 +61,10 @@ export default {
 
 		if (url.pathname === '/price') {
 			return handlePrice(request, url, env);
+		}
+
+		if (url.pathname === '/vision-search') {
+			return handleVisionSearch(request, env, headers);
 		}
 
 		if (url.pathname !== '/search') {
@@ -120,6 +133,62 @@ async function handlePrice(request: Request, url: URL, env: Env): Promise<Respon
 			return new Response(JSON.stringify({ error: 'Item not found or delisted' }), { status: 404, headers: jsonHeaders });
 		}
 		return new Response(JSON.stringify({ source, itemId, mock, ...result }), { headers: jsonHeaders });
+	} catch (err) {
+		return new Response(JSON.stringify({ error: String(err) }), { status: 502, headers: jsonHeaders });
+	}
+}
+
+/**
+ * Reconnaissance d'une couverture de livre/jeu par photo (Google Cloud
+ * Vision, Web Detection). Appelée depuis le navigateur (CORS actif,
+ * contrairement à /price). Le quota mensuel est vérifié AVANT tout appel
+ * réel à Vision (jamais dépassé), et incrémenté seulement APRÈS un appel
+ * réel réussi (un appel qui échoue ne consomme pas de quota).
+ */
+async function handleVisionSearch(request: Request, env: Env, headers: HeadersInit): Promise<Response> {
+	const jsonHeaders = { ...headers, 'Content-Type': 'application/json' };
+
+	if (request.method !== 'POST') {
+		return new Response(JSON.stringify({ error: 'Méthode non autorisée (POST attendu)' }), { status: 405, headers: jsonHeaders });
+	}
+
+	let body: { image?: string };
+	try {
+		body = await request.json();
+	} catch {
+		return new Response(JSON.stringify({ error: 'Corps JSON invalide' }), { status: 400, headers: jsonHeaders });
+	}
+
+	const image = body.image?.trim();
+	if (!image) {
+		return new Response(JSON.stringify({ error: "Champ 'image' manquant" }), { status: 400, headers: jsonHeaders });
+	}
+	if (image.length > MAX_IMAGE_BASE64_LENGTH) {
+		return new Response(JSON.stringify({ error: 'Image trop volumineuse' }), { status: 413, headers: jsonHeaders });
+	}
+
+	const vision = new VisionSource(env);
+	const limit = Number(env.VISION_MONTHLY_QUOTA) || DEFAULT_VISION_QUOTA;
+
+	if (!vision.isMock) {
+		const count = await readQuota(env.VISION_QUOTA_KV);
+		if (count >= limit) {
+			return new Response(
+				JSON.stringify({
+					error: 'quota_exceeded',
+					message: 'Quota mensuel Google Vision atteint — réessayez le mois prochain.',
+					count,
+					limit,
+				}),
+				{ status: 429, headers: jsonHeaders }
+			);
+		}
+	}
+
+	try {
+		const result = await vision.identify(image);
+		const count = result.mock ? await readQuota(env.VISION_QUOTA_KV) : await incrementQuota(env.VISION_QUOTA_KV);
+		return new Response(JSON.stringify({ ...result, quota: { count, limit } }), { headers: jsonHeaders });
 	} catch (err) {
 		return new Response(JSON.stringify({ error: String(err) }), { status: 502, headers: jsonHeaders });
 	}

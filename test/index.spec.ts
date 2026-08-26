@@ -1,6 +1,7 @@
 import { env, createExecutionContext, waitOnExecutionContext } from 'cloudflare:test';
 import { describe, it, expect } from 'vitest';
 import worker from '../src/index';
+import { quotaKey } from '../src/quota';
 
 const IncomingRequest = Request<unknown, IncomingRequestCfProperties>;
 
@@ -118,5 +119,69 @@ describe('zamble-search-api', () => {
 		expect(body.itemId).toBe('407067427636');
 		expect(body.mock).toBe(true);
 		expect(typeof body.price).toBe('number');
+	});
+
+	it('renvoie 405 sur /vision-search hors POST', async () => {
+		const request = new IncomingRequest('http://example.com/vision-search');
+		const ctx = createExecutionContext();
+		const response = await worker.fetch(request, env, ctx);
+		await waitOnExecutionContext(ctx);
+		expect(response.status).toBe(405);
+	});
+
+	it('renvoie 400 si le corps JSON est invalide sur /vision-search', async () => {
+		const request = new IncomingRequest('http://example.com/vision-search', {
+			method: 'POST',
+			body: 'pas du json',
+		});
+		const ctx = createExecutionContext();
+		const response = await worker.fetch(request, env, ctx);
+		await waitOnExecutionContext(ctx);
+		expect(response.status).toBe(400);
+	});
+
+	it("renvoie 400 si 'image' est manquant sur /vision-search", async () => {
+		const request = new IncomingRequest('http://example.com/vision-search', {
+			method: 'POST',
+			headers: { 'Content-Type': 'application/json' },
+			body: JSON.stringify({}),
+		});
+		const ctx = createExecutionContext();
+		const response = await worker.fetch(request, env, ctx);
+		await waitOnExecutionContext(ctx);
+		expect(response.status).toBe(400);
+	});
+
+	it('renvoie un résultat mocké sur /vision-search sans clé API configurée', async () => {
+		const request = new IncomingRequest('http://example.com/vision-search', {
+			method: 'POST',
+			headers: { 'Content-Type': 'application/json' },
+			body: JSON.stringify({ image: 'ZmFrZS1pbWFnZS1kYXRh' }),
+		});
+		const ctx = createExecutionContext();
+		const response = await worker.fetch(request, env, ctx);
+		await waitOnExecutionContext(ctx);
+		expect(response.status).toBe(200);
+
+		const body = (await response.json()) as { mock: boolean; label: string | null; quota: { count: number; limit: number } };
+		expect(body.mock).toBe(true);
+		expect(typeof body.label).toBe('string');
+		expect(body.quota.limit).toBe(900);
+	});
+
+	it('renvoie 429 quand le quota mensuel est atteint', async () => {
+		await env.VISION_QUOTA_KV.put(quotaKey(), '2');
+		const request = new IncomingRequest('http://example.com/vision-search', {
+			method: 'POST',
+			headers: { 'Content-Type': 'application/json' },
+			body: JSON.stringify({ image: 'ZmFrZS1pbWFnZS1kYXRh' }),
+		});
+		const ctx = createExecutionContext();
+		const response = await worker.fetch(request, { ...env, GOOGLE_VISION_API_KEY: 'fake-key', VISION_MONTHLY_QUOTA: '2' }, ctx);
+		await waitOnExecutionContext(ctx);
+		expect(response.status).toBe(429);
+
+		const body = (await response.json()) as { error: string };
+		expect(body.error).toBe('quota_exceeded');
 	});
 });

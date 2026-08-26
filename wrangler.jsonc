@@ -7,5 +7,13 @@
 	},
 	"vars": {
 		"ALLOWED_ORIGINS": "https://zamble.fr,https://zamble-scan.pages.dev",
+		"VISION_MONTHLY_QUOTA": "900",
 	},
+	"kv_namespaces": [
+		{
+			"binding": "VISION_QUOTA_KV",
+			"id": "cc9d91626a114aa5a2a382474de829d6",
+			"preview_id": "94847d1bdf964c36b67c08ee83893880",
+		},
+	],
 }
