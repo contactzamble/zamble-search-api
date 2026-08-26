@@ -72,6 +72,7 @@ export class AmazonSource implements Source {
 					price: item.Offers!.Listings![0].Price!.Amount!,
 					url,
 					affiliateUrl: `${url}?tag=${this.partnerTag || 'TAG_MANQUANT'}`,
+					mock: false,
 				};
 			});
 	}
@@ -175,6 +176,7 @@ export class AmazonSource implements Source {
 				price,
 				url: `https://www.amazon.fr/dp/MOCK${i}`,
 				affiliateUrl: `https://www.amazon.fr/dp/MOCK${i}?tag=${this.partnerTag || 'TAG_MANQUANT'}`,
+				mock: true,
 			});
 		}
 		return listings;

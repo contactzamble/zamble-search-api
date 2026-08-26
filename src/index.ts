@@ -9,8 +9,23 @@ export interface Env {
 	EBAY_APP_ID?: string;
 	EBAY_CERT_ID?: string;
 	EBAY_CAMPAIGN_ID?: string;
+	/** @deprecated remplacé par ALLOWED_ORIGINS (liste), gardé pour compat descendante */
 	ALLOWED_ORIGIN?: string;
+	/** Liste blanche d'origines autorisées en CORS, séparées par des virgules */
+	ALLOWED_ORIGINS?: string;
 	INTERNAL_API_TOKEN?: string;
+}
+
+const DEFAULT_ORIGIN = 'https://zamble.fr';
+
+function resolveAllowedOrigins(env: Env): string[] {
+	if (env.ALLOWED_ORIGINS) {
+		return env.ALLOWED_ORIGINS.split(',')
+			.map((s) => s.trim())
+			.filter(Boolean);
+	}
+	if (env.ALLOWED_ORIGIN) return [env.ALLOWED_ORIGIN];
+	return [DEFAULT_ORIGIN];
 }
 
 function corsHeaders(origin: string): HeadersInit {
@@ -18,12 +33,15 @@ function corsHeaders(origin: string): HeadersInit {
 		'Access-Control-Allow-Origin': origin,
 		'Access-Control-Allow-Methods': 'GET, OPTIONS',
 		'Access-Control-Allow-Headers': 'Content-Type',
+		Vary: 'Origin',
 	};
 }
 
 export default {
 	async fetch(request, env, _ctx): Promise<Response> {
-		const allowedOrigin = env.ALLOWED_ORIGIN ?? 'https://zamble.fr';
+		const allowedOrigins = resolveAllowedOrigins(env);
+		const requestOrigin = request.headers.get('Origin');
+		const allowedOrigin = requestOrigin && allowedOrigins.includes(requestOrigin) ? requestOrigin : allowedOrigins[0];
 		const headers = corsHeaders(allowedOrigin);
 
 		if (request.method === 'OPTIONS') {

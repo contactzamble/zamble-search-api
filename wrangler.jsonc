@@ -5,4 +5,7 @@
 	"observability": {
 		"enabled": true,
 	},
+	"vars": {
+		"ALLOWED_ORIGINS": "https://zamble.fr,https://zamble-scan.pages.dev",
+	},
 }

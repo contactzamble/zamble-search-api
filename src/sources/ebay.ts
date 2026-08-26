@@ -64,6 +64,7 @@ export class EbaySource implements Source {
 				price: Number(item.price?.value),
 				url: item.itemWebUrl,
 				affiliateUrl: this.buildAffiliateUrl(item.itemWebUrl),
+				mock: false,
 			}));
 	}
 
@@ -173,6 +174,7 @@ export class EbaySource implements Source {
 				price,
 				url: `https://www.ebay.fr/itm/MOCK${i}`,
 				affiliateUrl: `https://www.ebay.fr/itm/MOCK${i}?campid=${this.campaignId || 'CAMPID_MANQUANT'}`,
+				mock: true,
 			});
 		}
 		return listings;

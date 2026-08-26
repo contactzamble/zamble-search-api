@@ -31,23 +31,57 @@ describe('zamble-search-api', () => {
 		const body = (await response.json()) as {
 			query: string;
 			mock: boolean;
-			results: { source: string; price: number }[];
+			results: { source: string; price: number; mock: boolean }[];
 		};
 		expect(body.query).toBe('lego star wars');
 		expect(body.mock).toBe(true);
 		expect(body.results.length).toBe(8);
 		expect(body.results.some((r) => r.source === 'amazon')).toBe(true);
 		expect(body.results.some((r) => r.source === 'ebay')).toBe(true);
+		// Le flag global `mock` est vrai dès qu'une source manque de clés, mais
+		// chaque annonce porte aussi son propre flag (ici toutes mockées, faute
+		// de clés Amazon/eBay dans l'environnement de test).
+		expect(body.results.every((r) => r.mock === true)).toBe(true);
 
 		const prices = body.results.map((r) => r.price);
 		const sorted = [...prices].sort((a, b) => a - b);
 		expect(prices).toEqual(sorted);
 	});
 
-	it('répond aux requêtes OPTIONS avec les en-têtes CORS', async () => {
+	it('répond aux requêtes OPTIONS avec les en-têtes CORS (origine par défaut)', async () => {
 		const request = new IncomingRequest('http://example.com/search', { method: 'OPTIONS' });
 		const ctx = createExecutionContext();
 		const response = await worker.fetch(request, env, ctx);
+		await waitOnExecutionContext(ctx);
+		expect(response.headers.get('Access-Control-Allow-Origin')).toBe('https://zamble.fr');
+	});
+
+	it('autorise une origine supplémentaire présente dans ALLOWED_ORIGINS', async () => {
+		const request = new IncomingRequest('http://example.com/search', {
+			method: 'OPTIONS',
+			headers: { Origin: 'https://zamble-scan.pages.dev' },
+		});
+		const ctx = createExecutionContext();
+		const response = await worker.fetch(
+			request,
+			{ ...env, ALLOWED_ORIGINS: 'https://zamble.fr,https://zamble-scan.pages.dev' },
+			ctx
+		);
+		await waitOnExecutionContext(ctx);
+		expect(response.headers.get('Access-Control-Allow-Origin')).toBe('https://zamble-scan.pages.dev');
+	});
+
+	it('retombe sur la première origine autorisée si Origin ne correspond à rien', async () => {
+		const request = new IncomingRequest('http://example.com/search', {
+			method: 'OPTIONS',
+			headers: { Origin: 'https://site-inconnu.example' },
+		});
+		const ctx = createExecutionContext();
+		const response = await worker.fetch(
+			request,
+			{ ...env, ALLOWED_ORIGINS: 'https://zamble.fr,https://zamble-scan.pages.dev' },
+			ctx
+		);
 		await waitOnExecutionContext(ctx);
 		expect(response.headers.get('Access-Control-Allow-Origin')).toBe('https://zamble.fr');
 	});

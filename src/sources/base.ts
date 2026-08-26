@@ -4,6 +4,13 @@ export interface Listing {
 	price: number;
 	url: string;
 	affiliateUrl: string;
+	/**
+	 * true si ce résultat vient du générateur mock (clés absentes pour CETTE
+	 * source), indépendamment du flag global `mock` de la réponse (qui est
+	 * true dès qu'UNE SEULE des deux sources est mockée — ne suffit pas à
+	 * distinguer "eBay réel + Amazon mock" de "les deux mockés").
+	 */
+	mock: boolean;
 }
 
 export interface ItemPrice {
