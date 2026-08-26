@@ -16,7 +16,7 @@ interface WebDetectionResponse {
 	responses?: {
 		webDetection?: {
 			bestGuessLabels?: { label?: string }[];
-			webEntities?: { description?: string }[];
+			webEntities?: { description?: string; score?: number }[];
 			pagesWithMatchingImages?: { pageTitle?: string }[];
 			visuallySimilarImages?: { url?: string }[];
 		};
@@ -75,8 +75,15 @@ export class VisionSource {
 		}
 
 		const web = first?.webDetection;
-		const label =
-			web?.bestGuessLabels?.[0]?.label ?? web?.webEntities?.find((e) => e.description)?.description ?? web?.pagesWithMatchingImages?.[0]?.pageTitle ?? null;
+		// Priorité : une page où Google a retrouvé LA MÊME image (signal le plus
+		// fiable — souvent une fiche produit/librairie avec un titre précis) >
+		// l'entité web la mieux notée (identification sémantique) > le "best
+		// guess" de Google, qui est un résumé générique et se rabat souvent sur
+		// une catégorie vague (ex. "art") quand l'objet précis n'est pas reconnu.
+		const bestEntity = [...(web?.webEntities ?? [])]
+			.filter((e) => e.description)
+			.sort((a, b) => (b.score ?? 0) - (a.score ?? 0))[0];
+		const label = web?.pagesWithMatchingImages?.[0]?.pageTitle ?? bestEntity?.description ?? web?.bestGuessLabels?.[0]?.label ?? null;
 		const thumbnailUrl = web?.visuallySimilarImages?.[0]?.url ?? null;
 
 		return { label, thumbnailUrl, mock: false };
