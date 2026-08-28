@@ -12,6 +12,7 @@ export interface Env {
 	EBAY_CERT_ID?: string;
 	EBAY_CAMPAIGN_ID?: string;
 	GOOGLE_VISION_API_KEY?: string;
+	GOOGLE_BOOKS_API_KEY?: string;
 	VISION_MONTHLY_QUOTA?: string;
 	VISION_QUOTA_KV: KVNamespace;
 	/** @deprecated remplacé par ALLOWED_ORIGINS (liste), gardé pour compat descendante */
@@ -69,6 +70,10 @@ export default {
 
 		if (url.pathname === '/product-lookup') {
 			return handleProductLookup(url, headers);
+		}
+
+		if (url.pathname === '/book-lookup') {
+			return handleBookLookup(url, env, headers);
 		}
 
 		if (url.pathname !== '/search') {
@@ -167,6 +172,59 @@ async function handleProductLookup(url: URL, headers: HeadersInit): Promise<Resp
 		return new Response(JSON.stringify({ title: item?.title || null, brand: item?.brand || null }), { headers: jsonHeaders });
 	} catch {
 		return new Response(JSON.stringify({ title: null, brand: null }), { headers: jsonHeaders });
+	}
+}
+
+/**
+ * Titre/auteur(s)/éditeur/couverture d'un livre par ISBN, via Google Books.
+ * Filet de sécurité côté serveur pour quand Open Library (appelé directement
+ * par le navigateur, sans clé) ne connaît pas le livre — l'API Google Books
+ * appelée SANS clé partage un quota anonyme mondial qui se retrouve à sec
+ * en pratique (constaté en prod : 429 "quota_limit_value: 0"), d'où le
+ * passage par une clé dédiée ici plutôt qu'un appel client direct. Même
+ * philosophie best-effort que /product-lookup : jamais d'erreur dure, un
+ * échec renvoie des champs null.
+ */
+async function handleBookLookup(url: URL, env: Env, headers: HeadersInit): Promise<Response> {
+	const jsonHeaders = { ...headers, 'Content-Type': 'application/json' };
+	const isbn = url.searchParams.get('isbn')?.trim();
+	if (!isbn) {
+		return new Response(JSON.stringify({ error: "Paramètre 'isbn' manquant" }), { status: 400, headers: jsonHeaders });
+	}
+
+	const empty = { title: null, author: null, publisher: null, cover: null };
+	if (!env.GOOGLE_BOOKS_API_KEY) {
+		return new Response(JSON.stringify(empty), { headers: jsonHeaders });
+	}
+
+	try {
+		const response = await fetch(
+			`https://www.googleapis.com/books/v1/volumes?q=isbn:${encodeURIComponent(isbn)}&key=${env.GOOGLE_BOOKS_API_KEY}`
+		);
+		if (!response.ok) {
+			return new Response(JSON.stringify(empty), { headers: jsonHeaders });
+		}
+		const data = (await response.json()) as {
+			items?: { volumeInfo?: { title?: string; authors?: string[]; publisher?: string; imageLinks?: Record<string, string> } }[];
+		};
+		const info = data.items?.[0]?.volumeInfo;
+		if (!info?.title) {
+			return new Response(JSON.stringify(empty), { headers: jsonHeaders });
+		}
+		const cover =
+			(info.imageLinks?.extraLarge || info.imageLinks?.large || info.imageLinks?.medium || info.imageLinks?.thumbnail || null)
+				?.replace('http://', 'https://') || null;
+		return new Response(
+			JSON.stringify({
+				title: info.title,
+				author: (info.authors || []).join(', ') || null,
+				publisher: info.publisher || null,
+				cover,
+			}),
+			{ headers: jsonHeaders }
+		);
+	} catch {
+		return new Response(JSON.stringify(empty), { headers: jsonHeaders });
 	}
 }
 

@@ -177,6 +177,25 @@ describe('zamble-search-api', () => {
 		expect(response.status).toBe(400);
 	});
 
+	it("renvoie 400 sur /book-lookup si 'isbn' est manquant", async () => {
+		const request = new IncomingRequest('http://example.com/book-lookup');
+		const ctx = createExecutionContext();
+		const response = await worker.fetch(request, env, ctx);
+		await waitOnExecutionContext(ctx);
+		expect(response.status).toBe(400);
+	});
+
+	it('renvoie des champs null sur /book-lookup sans clé Google Books configurée', async () => {
+		const request = new IncomingRequest('http://example.com/book-lookup?isbn=9782070408504');
+		const ctx = createExecutionContext();
+		const response = await worker.fetch(request, env, ctx);
+		await waitOnExecutionContext(ctx);
+		expect(response.status).toBe(200);
+
+		const body = (await response.json()) as { title: string | null };
+		expect(body.title).toBeNull();
+	});
+
 	it('renvoie 429 quand le quota mensuel est atteint', async () => {
 		await env.VISION_QUOTA_KV.put(quotaKey(), '2');
 		const request = new IncomingRequest('http://example.com/vision-search', {
