@@ -183,7 +183,10 @@ async function handleProductLookup(url: URL, headers: HeadersInit): Promise<Resp
  * en pratique (constaté en prod : 429 "quota_limit_value: 0"), d'où le
  * passage par une clé dédiée ici plutôt qu'un appel client direct. Même
  * philosophie best-effort que /product-lookup : jamais d'erreur dure, un
- * échec renvoie des champs null.
+ * échec renvoie des champs null. Deux tentatives : l'API Google Books
+ * elle-même s'est révélée instable en pratique (503 par intermittence,
+ * observé sur ~2 appels sur 3 lors du diagnostic), pas seulement un
+ * problème de quota/clé.
  */
 async function handleBookLookup(url: URL, env: Env, headers: HeadersInit): Promise<Response> {
 	const jsonHeaders = { ...headers, 'Content-Type': 'application/json' };
@@ -198,9 +201,9 @@ async function handleBookLookup(url: URL, env: Env, headers: HeadersInit): Promi
 	}
 
 	try {
-		const response = await fetch(
-			`https://www.googleapis.com/books/v1/volumes?q=isbn:${encodeURIComponent(isbn)}&key=${env.GOOGLE_BOOKS_API_KEY}`
-		);
+		const apiUrl = `https://www.googleapis.com/books/v1/volumes?q=isbn:${encodeURIComponent(isbn)}&key=${env.GOOGLE_BOOKS_API_KEY}`;
+		let response = await fetch(apiUrl);
+		if (!response.ok) response = await fetch(apiUrl);
 		if (!response.ok) {
 			return new Response(JSON.stringify(empty), { headers: jsonHeaders });
 		}
