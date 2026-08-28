@@ -269,7 +269,8 @@ async function handleVisionSearch(request: Request, env: Env, headers: HeadersIn
 			return new Response(
 				JSON.stringify({
 					error: 'quota_exceeded',
-					message: 'Quota mensuel Google Vision atteint — réessayez le mois prochain.',
+					message:
+						'Vous avez atteint le nombre de requêtes maximal pour un usage en mode gratuit. Pour repousser cette limite, abonnez-vous à l\'option de votre choix.',
 					count,
 					limit,
 				}),
