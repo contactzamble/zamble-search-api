@@ -26,6 +26,14 @@ export interface Env {
 // borne à la fois l'abus d'upload et la taille de la requête vers Vision.
 const MAX_IMAGE_BASE64_LENGTH = 2_800_000;
 
+// Message unique, quel que soit le service externe qui a atteint sa limite
+// (Vision, Google Books, UPCitemdb...) — principe voulu : tout reste gratuit
+// tant qu'aucune limite n'est touchée, et le jour où une limite l'est (peu
+// importe laquelle), même message partout. Base d'une future monétisation
+// par abonnement plutôt qu'un blocage brut.
+const FREE_QUOTA_MESSAGE =
+	"Vous avez atteint le nombre de requêtes maximal pour un usage en mode gratuit. Pour repousser cette limite, abonnez-vous à l'option de votre choix.";
+
 const DEFAULT_ORIGIN = 'https://zamble.fr';
 
 function resolveAllowedOrigins(env: Env): string[] {
@@ -153,7 +161,10 @@ async function handlePrice(request: Request, url: URL, env: Env): Promise<Respon
  * partagées par IP). Contrairement à /search, jamais d'erreur dure côté client :
  * un échec (produit inconnu, quota trial dépassé, panne réseau) renvoie des champs
  * null plutôt qu'un 4xx/5xx — ce lookup n'est qu'un enrichissement facultatif du
- * titre déjà connu (le code brut scanné), jamais bloquant pour l'appli.
+ * titre déjà connu (le code brut scanné), jamais bloquant pour l'appli. Seule
+ * exception : un 429 (quota des 100 requêtes/jour épuisé) est distingué d'un
+ * simple "produit inconnu" via `quotaExceeded`, pour que le frontend affiche
+ * le message d'abonnement plutôt que "produit non trouvé" (trompeur ici).
  */
 async function handleProductLookup(url: URL, headers: HeadersInit): Promise<Response> {
 	const jsonHeaders = { ...headers, 'Content-Type': 'application/json' };
@@ -164,6 +175,12 @@ async function handleProductLookup(url: URL, headers: HeadersInit): Promise<Resp
 
 	try {
 		const response = await fetch(`https://api.upcitemdb.com/prod/trial/lookup?upc=${encodeURIComponent(upc)}`);
+		if (response.status === 429) {
+			return new Response(
+				JSON.stringify({ title: null, brand: null, quotaExceeded: true, message: FREE_QUOTA_MESSAGE }),
+				{ headers: jsonHeaders }
+			);
+		}
 		if (!response.ok) {
 			return new Response(JSON.stringify({ title: null, brand: null }), { headers: jsonHeaders });
 		}
@@ -186,7 +203,9 @@ async function handleProductLookup(url: URL, headers: HeadersInit): Promise<Resp
  * échec renvoie des champs null. Deux tentatives : l'API Google Books
  * elle-même s'est révélée instable en pratique (503 par intermittence,
  * observé sur ~2 appels sur 3 lors du diagnostic), pas seulement un
- * problème de quota/clé.
+ * problème de quota/clé. Si les DEUX tentatives renvoient un 429 (quota du
+ * projet Google Cloud dépassé), c'est distingué via `quotaExceeded` plutôt
+ * que traité comme "livre inconnu".
  */
 async function handleBookLookup(url: URL, env: Env, headers: HeadersInit): Promise<Response> {
 	const jsonHeaders = { ...headers, 'Content-Type': 'application/json' };
@@ -204,6 +223,9 @@ async function handleBookLookup(url: URL, env: Env, headers: HeadersInit): Promi
 		const apiUrl = `https://www.googleapis.com/books/v1/volumes?q=isbn:${encodeURIComponent(isbn)}&key=${env.GOOGLE_BOOKS_API_KEY}`;
 		let response = await fetch(apiUrl);
 		if (!response.ok) response = await fetch(apiUrl);
+		if (response.status === 429) {
+			return new Response(JSON.stringify({ ...empty, quotaExceeded: true, message: FREE_QUOTA_MESSAGE }), { headers: jsonHeaders });
+		}
 		if (!response.ok) {
 			return new Response(JSON.stringify(empty), { headers: jsonHeaders });
 		}
@@ -269,8 +291,7 @@ async function handleVisionSearch(request: Request, env: Env, headers: HeadersIn
 			return new Response(
 				JSON.stringify({
 					error: 'quota_exceeded',
-					message:
-						'Vous avez atteint le nombre de requêtes maximal pour un usage en mode gratuit. Pour repousser cette limite, abonnez-vous à l\'option de votre choix.',
+					message: FREE_QUOTA_MESSAGE,
 					count,
 					limit,
 				}),
