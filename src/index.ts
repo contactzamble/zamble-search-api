@@ -67,6 +67,10 @@ export default {
 			return handleVisionSearch(request, env, headers);
 		}
 
+		if (url.pathname === '/product-lookup') {
+			return handleProductLookup(url, headers);
+		}
+
 		if (url.pathname !== '/search') {
 			return new Response('Not found', { status: 404, headers });
 		}
@@ -135,6 +139,34 @@ async function handlePrice(request: Request, url: URL, env: Env): Promise<Respon
 		return new Response(JSON.stringify({ source, itemId, mock, ...result }), { headers: jsonHeaders });
 	} catch (err) {
 		return new Response(JSON.stringify({ error: String(err) }), { status: 502, headers: jsonHeaders });
+	}
+}
+
+/**
+ * Nom + marque d'un produit générique (jeu, jouet...) à partir de son code-barres
+ * EAN/UPC, via UPCitemdb (API trial, gratuite, sans clé, limitée à 100 requêtes/jour
+ * partagées par IP). Contrairement à /search, jamais d'erreur dure côté client :
+ * un échec (produit inconnu, quota trial dépassé, panne réseau) renvoie des champs
+ * null plutôt qu'un 4xx/5xx — ce lookup n'est qu'un enrichissement facultatif du
+ * titre déjà connu (le code brut scanné), jamais bloquant pour l'appli.
+ */
+async function handleProductLookup(url: URL, headers: HeadersInit): Promise<Response> {
+	const jsonHeaders = { ...headers, 'Content-Type': 'application/json' };
+	const upc = url.searchParams.get('upc')?.trim();
+	if (!upc) {
+		return new Response(JSON.stringify({ error: "Paramètre 'upc' manquant" }), { status: 400, headers: jsonHeaders });
+	}
+
+	try {
+		const response = await fetch(`https://api.upcitemdb.com/prod/trial/lookup?upc=${encodeURIComponent(upc)}`);
+		if (!response.ok) {
+			return new Response(JSON.stringify({ title: null, brand: null }), { headers: jsonHeaders });
+		}
+		const data = (await response.json()) as { items?: { title?: string; brand?: string }[] };
+		const item = data.items?.[0];
+		return new Response(JSON.stringify({ title: item?.title || null, brand: item?.brand || null }), { headers: jsonHeaders });
+	} catch {
+		return new Response(JSON.stringify({ title: null, brand: null }), { headers: jsonHeaders });
 	}
 }
 

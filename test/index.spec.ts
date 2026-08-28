@@ -169,6 +169,14 @@ describe('zamble-search-api', () => {
 		expect(body.quota.limit).toBe(900);
 	});
 
+	it("renvoie 400 sur /product-lookup si 'upc' est manquant", async () => {
+		const request = new IncomingRequest('http://example.com/product-lookup');
+		const ctx = createExecutionContext();
+		const response = await worker.fetch(request, env, ctx);
+		await waitOnExecutionContext(ctx);
+		expect(response.status).toBe(400);
+	});
+
 	it('renvoie 429 quand le quota mensuel est atteint', async () => {
 		await env.VISION_QUOTA_KV.put(quotaKey(), '2');
 		const request = new IncomingRequest('http://example.com/vision-search', {
