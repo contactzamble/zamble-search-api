@@ -39,7 +39,16 @@ export class EbaySource implements Source {
 		const token = await this.getAccessToken();
 		const url = new URL('https://api.ebay.com/buy/browse/v1/item_summary/search');
 		url.searchParams.set('q', keyword);
-		url.searchParams.set('limit', '4');
+		url.searchParams.set('limit', '20');
+		// Tri par prix croissant explicite : le tri par défaut de l'API ("pertinence")
+		// ne garantit pas que le moins cher soit dans les 4 premiers résultats — un
+		// vrai cas rencontré par l'utilisatrice, qui a retrouvé sur eBay une annonce
+		// moins chère que celle affichée par l'appli. Limité aux annonces à prix fixe
+		// (Achat immédiat) : sans ce filtre, une enchère avec une mise de départ très
+		// basse remonterait en tête alors que ce prix n'est pas réellement disponible
+		// à l'achat, ce qui rendrait le badge trompeur plutôt qu'utile.
+		url.searchParams.set('sort', 'price');
+		url.searchParams.set('filter', 'buyingOptions:{FIXED_PRICE}');
 
 		const response = await fetch(url, {
 			headers: {
