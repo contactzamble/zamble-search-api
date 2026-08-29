@@ -255,6 +255,7 @@ async function handleBookLookup(url: URL, env: Env, headers: HeadersInit): Promi
 		const apiUrl = `https://www.googleapis.com/books/v1/volumes?q=isbn:${encodeURIComponent(isbn)}&key=${env.GOOGLE_BOOKS_API_KEY}`;
 		let response = await fetch(apiUrl);
 		if (!response.ok) response = await fetch(apiUrl);
+		if (!response.ok) response = await fetch(apiUrl);
 		if (response.status === 429) {
 			return new Response(JSON.stringify({ ...empty, quotaExceeded: true, message: FREE_QUOTA_MESSAGE }), { headers: jsonHeaders });
 		}
