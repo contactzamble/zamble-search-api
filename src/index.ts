@@ -166,6 +166,36 @@ async function handlePrice(request: Request, url: URL, env: Env): Promise<Respon
  * simple "produit inconnu" via `quotaExceeded`, pour que le frontend affiche
  * le message d'abonnement plutôt que "produit non trouvé" (trompeur ici).
  */
+/**
+ * Nettoie un titre brut UPCitemdb : les données de certains revendeurs
+ * collent marque/nom/référence/langue sans espaces (ex. "Tokyo51315french
+ * version"), ce qui casse la recherche côté Vinted/Google. Ne retire aucune
+ * information (un numéro peut être l'info clé pour un autre objet, ex. un
+ * set LEGO) — corrige juste l'espacement et enlève la marque si elle est
+ * déjà répétée en préfixe (affichée séparément comme éditeur ailleurs dans
+ * l'appli, la garder ici ferait doublon dans la requête de recherche).
+ */
+function cleanProductTitle(rawTitle: string, brand: string | null): string {
+	let title = rawTitle
+		.replace(/([a-zà-ÿ])([A-ZÀ-Ÿ0-9])/g, '$1 $2')
+		.replace(/([0-9])([A-Za-zÀ-ÿ])/g, '$1 $2')
+		.replace(/\s+/g, ' ')
+		.trim();
+
+	if (brand) {
+		const prefixMatch = title.match(/^([\s:.\-]*)/);
+		const withoutLeadingPunct = title.slice(prefixMatch ? prefixMatch[0].length : 0);
+		if (withoutLeadingPunct.toLowerCase().startsWith(brand.toLowerCase())) {
+			title = withoutLeadingPunct
+				.slice(brand.length)
+				.replace(/^[\s:.\-]+/, '')
+				.trim() || title;
+		}
+	}
+
+	return title;
+}
+
 async function handleProductLookup(url: URL, headers: HeadersInit): Promise<Response> {
 	const jsonHeaders = { ...headers, 'Content-Type': 'application/json' };
 	const upc = url.searchParams.get('upc')?.trim();
@@ -186,7 +216,9 @@ async function handleProductLookup(url: URL, headers: HeadersInit): Promise<Resp
 		}
 		const data = (await response.json()) as { items?: { title?: string; brand?: string }[] };
 		const item = data.items?.[0];
-		return new Response(JSON.stringify({ title: item?.title || null, brand: item?.brand || null }), { headers: jsonHeaders });
+		const brand = item?.brand || null;
+		const title = item?.title ? cleanProductTitle(item.title, brand) : null;
+		return new Response(JSON.stringify({ title, brand }), { headers: jsonHeaders });
 	} catch {
 		return new Response(JSON.stringify({ title: null, brand: null }), { headers: jsonHeaders });
 	}
