@@ -15,5 +15,10 @@
 			"id": "cc9d91626a114aa5a2a382474de829d6",
 			"preview_id": "94847d1bdf964c36b67c08ee83893880",
 		},
+		{
+			"binding": "LOOKUP_CACHE_KV",
+			"id": "80fe010ea31a40f48a33c00b7aa407db",
+			"preview_id": "468fff46cd8c4738aaebc6fd7f76a216",
+		},
 	],
 }

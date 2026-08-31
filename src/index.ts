@@ -15,6 +15,7 @@ export interface Env {
 	GOOGLE_BOOKS_API_KEY?: string;
 	VISION_MONTHLY_QUOTA?: string;
 	VISION_QUOTA_KV: KVNamespace;
+	LOOKUP_CACHE_KV: KVNamespace;
 	/** @deprecated remplacé par ALLOWED_ORIGINS (liste), gardé pour compat descendante */
 	ALLOWED_ORIGIN?: string;
 	/** Liste blanche d'origines autorisées en CORS, séparées par des virgules */
@@ -77,7 +78,7 @@ export default {
 		}
 
 		if (url.pathname === '/product-lookup') {
-			return handleProductLookup(url, headers);
+			return handleProductLookup(url, env, headers);
 		}
 
 		if (url.pathname === '/book-lookup') {
@@ -196,11 +197,35 @@ function cleanProductTitle(rawTitle: string, brand: string | null): string {
 	return title;
 }
 
-async function handleProductLookup(url: URL, headers: HeadersInit): Promise<Response> {
+/**
+ * Cache KV partagé (tous utilisateurs confondus) des lookups produit/livre
+ * déjà résolus avec succès — un code-barre/ISBN identifie une fiche
+ * catalogue essentiellement immuable (titre/auteur/éditeur ne changent pas),
+ * donc un cache permanent (pas de TTL) est sûr et fait durer beaucoup plus
+ * longtemps les quotas gratuits externes (UPCitemdb 100/jour, Google Books).
+ * Volontairement PAS de cache sur un échec/quota dépassé : un raté est
+ * souvent transitoire (429, 503 intermittent de Google Books...), le
+ * mettre en cache figerait un faux "introuvable" pour toujours.
+ */
+async function readLookupCache<T>(kv: KVNamespace, key: string): Promise<T | null> {
+	const cached = await kv.get(key);
+	return cached ? (JSON.parse(cached) as T) : null;
+}
+async function writeLookupCache(kv: KVNamespace, key: string, value: unknown): Promise<void> {
+	await kv.put(key, JSON.stringify(value));
+}
+
+async function handleProductLookup(url: URL, env: Env, headers: HeadersInit): Promise<Response> {
 	const jsonHeaders = { ...headers, 'Content-Type': 'application/json' };
 	const upc = url.searchParams.get('upc')?.trim();
 	if (!upc) {
 		return new Response(JSON.stringify({ error: "Paramètre 'upc' manquant" }), { status: 400, headers: jsonHeaders });
+	}
+
+	const cacheKey = `upc:${upc}`;
+	const cached = await readLookupCache<{ title: string; brand: string | null }>(env.LOOKUP_CACHE_KV, cacheKey);
+	if (cached) {
+		return new Response(JSON.stringify(cached), { headers: jsonHeaders });
 	}
 
 	try {
@@ -218,7 +243,9 @@ async function handleProductLookup(url: URL, headers: HeadersInit): Promise<Resp
 		const item = data.items?.[0];
 		const brand = item?.brand || null;
 		const title = item?.title ? cleanProductTitle(item.title, brand) : null;
-		return new Response(JSON.stringify({ title, brand }), { headers: jsonHeaders });
+		const result = { title, brand };
+		if (title) await writeLookupCache(env.LOOKUP_CACHE_KV, cacheKey, result);
+		return new Response(JSON.stringify(result), { headers: jsonHeaders });
 	} catch {
 		return new Response(JSON.stringify({ title: null, brand: null }), { headers: jsonHeaders });
 	}
@@ -247,6 +274,13 @@ async function handleBookLookup(url: URL, env: Env, headers: HeadersInit): Promi
 	}
 
 	const empty = { title: null, author: null, publisher: null, cover: null };
+
+	const cacheKey = `isbn:${isbn}`;
+	const cached = await readLookupCache<typeof empty>(env.LOOKUP_CACHE_KV, cacheKey);
+	if (cached) {
+		return new Response(JSON.stringify(cached), { headers: jsonHeaders });
+	}
+
 	if (!env.GOOGLE_BOOKS_API_KEY) {
 		return new Response(JSON.stringify(empty), { headers: jsonHeaders });
 	}
@@ -272,13 +306,15 @@ async function handleBookLookup(url: URL, env: Env, headers: HeadersInit): Promi
 		const cover =
 			(info.imageLinks?.extraLarge || info.imageLinks?.large || info.imageLinks?.medium || info.imageLinks?.thumbnail || null)
 				?.replace('http://', 'https://') || null;
+		const result = {
+			title: info.title,
+			author: (info.authors || []).join(', ') || null,
+			publisher: info.publisher || null,
+			cover,
+		};
+		await writeLookupCache(env.LOOKUP_CACHE_KV, cacheKey, result);
 		return new Response(
-			JSON.stringify({
-				title: info.title,
-				author: (info.authors || []).join(', ') || null,
-				publisher: info.publisher || null,
-				cover,
-			}),
+			JSON.stringify(result),
 			{ headers: jsonHeaders }
 		);
 	} catch {
