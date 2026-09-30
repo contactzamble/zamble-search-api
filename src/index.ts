@@ -266,6 +266,27 @@ async function handleProductLookup(url: URL, env: Env, headers: HeadersInit): Pr
  * projet Google Cloud dépassé), c'est distingué via `quotaExceeded` plutôt
  * que traité comme "livre inconnu".
  */
+function normalizeIsbn(value: string): string {
+	return value.replace(/[^0-9Xx]/g, '').toUpperCase();
+}
+
+/** ISBN normalisé + son équivalent ISBN-10/13 (Google Books peut n'indexer que l'un des deux). */
+function isbnVariants(isbn: string): Set<string> {
+	const clean = normalizeIsbn(isbn);
+	const variants = new Set([clean]);
+	if (clean.length === 13 && clean.startsWith('978')) {
+		const core = clean.slice(3, 12);
+		const sum = [...core].reduce((acc, d, i) => acc + Number(d) * (10 - i), 0);
+		const check = (11 - (sum % 11)) % 11;
+		variants.add(core + (check === 10 ? 'X' : String(check)));
+	} else if (clean.length === 10) {
+		const core = '978' + clean.slice(0, 9);
+		const sum = [...core].reduce((acc, d, i) => acc + Number(d) * (i % 2 ? 3 : 1), 0);
+		variants.add(core + String((10 - (sum % 10)) % 10));
+	}
+	return variants;
+}
+
 async function handleBookLookup(url: URL, env: Env, headers: HeadersInit): Promise<Response> {
 	const jsonHeaders = { ...headers, 'Content-Type': 'application/json' };
 	const isbn = url.searchParams.get('isbn')?.trim();
@@ -297,9 +318,26 @@ async function handleBookLookup(url: URL, env: Env, headers: HeadersInit): Promi
 			return new Response(JSON.stringify(empty), { headers: jsonHeaders });
 		}
 		const data = (await response.json()) as {
-			items?: { volumeInfo?: { title?: string; authors?: string[]; publisher?: string; imageLinks?: Record<string, string> } }[];
+			items?: {
+				volumeInfo?: {
+					title?: string;
+					authors?: string[];
+					publisher?: string;
+					imageLinks?: Record<string, string>;
+					industryIdentifiers?: { type?: string; identifier?: string }[];
+				};
+			}[];
 		};
-		const info = data.items?.[0]?.volumeInfo;
+		// `q=isbn:` n'est PAS une recherche exacte : quand l'ISBN demandé est
+		// absent de Google Books, l'API renvoie quand même un livre voisin
+		// (même éditeur/collection — constaté avec des ISBN "Max et Lili"
+		// volontairement invalides qui ressortaient comme un autre tome). On
+		// ne garde donc que le résultat dont les identifiants contiennent
+		// vraiment l'ISBN scanné.
+		const wanted = isbnVariants(isbn);
+		const info = data.items
+			?.map((item) => item.volumeInfo)
+			.find((v) => v?.industryIdentifiers?.some((id) => wanted.has(normalizeIsbn(id.identifier || ''))));
 		if (!info?.title) {
 			return new Response(JSON.stringify(empty), { headers: jsonHeaders });
 		}
