@@ -251,21 +251,6 @@ async function handleProductLookup(url: URL, env: Env, headers: HeadersInit): Pr
 	}
 }
 
-/**
- * Titre/auteur(s)/éditeur/couverture d'un livre par ISBN, via Google Books.
- * Filet de sécurité côté serveur pour quand Open Library (appelé directement
- * par le navigateur, sans clé) ne connaît pas le livre — l'API Google Books
- * appelée SANS clé partage un quota anonyme mondial qui se retrouve à sec
- * en pratique (constaté en prod : 429 "quota_limit_value: 0"), d'où le
- * passage par une clé dédiée ici plutôt qu'un appel client direct. Même
- * philosophie best-effort que /product-lookup : jamais d'erreur dure, un
- * échec renvoie des champs null. Deux tentatives : l'API Google Books
- * elle-même s'est révélée instable en pratique (503 par intermittence,
- * observé sur ~2 appels sur 3 lors du diagnostic), pas seulement un
- * problème de quota/clé. Si les DEUX tentatives renvoient un 429 (quota du
- * projet Google Cloud dépassé), c'est distingué via `quotaExceeded` plutôt
- * que traité comme "livre inconnu".
- */
 function normalizeIsbn(value: string): string {
 	return value.replace(/[^0-9Xx]/g, '').toUpperCase();
 }
@@ -287,6 +272,121 @@ function isbnVariants(isbn: string): Set<string> {
 	return variants;
 }
 
+type BookInfo = { title: string; author: string | null; publisher: string | null; cover: string | null };
+
+/**
+ * Google Books par ISBN. `q=isbn:` n'est PAS une recherche exacte : quand
+ * l'ISBN demandé est absent de Google Books, l'API renvoie quand même un
+ * livre voisin (même éditeur/collection — constaté avec des ISBN "Max et
+ * Lili" volontairement invalides qui ressortaient comme un autre tome). On
+ * ne garde donc que le résultat dont les identifiants contiennent vraiment
+ * l'ISBN scanné. Trois tentatives : l'API est instable (503 intermittents).
+ */
+async function lookupGoogleBooksIsbn(isbn: string, env: Env): Promise<BookInfo | 'quota' | null> {
+	if (!env.GOOGLE_BOOKS_API_KEY) return null;
+	try {
+		const apiUrl = `https://www.googleapis.com/books/v1/volumes?q=isbn:${encodeURIComponent(isbn)}&key=${env.GOOGLE_BOOKS_API_KEY}`;
+		let response = await fetch(apiUrl);
+		if (!response.ok) response = await fetch(apiUrl);
+		if (!response.ok) response = await fetch(apiUrl);
+		if (response.status === 429) return 'quota';
+		if (!response.ok) return null;
+		const data = (await response.json()) as {
+			items?: {
+				volumeInfo?: {
+					title?: string;
+					authors?: string[];
+					publisher?: string;
+					imageLinks?: Record<string, string>;
+					industryIdentifiers?: { type?: string; identifier?: string }[];
+				};
+			}[];
+		};
+		const wanted = isbnVariants(isbn);
+		const info = data.items
+			?.map((item) => item.volumeInfo)
+			.find((v) => v?.industryIdentifiers?.some((id) => wanted.has(normalizeIsbn(id.identifier || ''))));
+		if (!info?.title) return null;
+		const cover =
+			(info.imageLinks?.extraLarge || info.imageLinks?.large || info.imageLinks?.medium || info.imageLinks?.thumbnail || null)
+				?.replace('http://', 'https://') || null;
+		return {
+			title: info.title,
+			author: (info.authors || []).join(', ') || null,
+			publisher: info.publisher || null,
+			cover,
+		};
+	} catch {
+		return null;
+	}
+}
+
+function decodeXmlEntities(value: string): string {
+	return value
+		.replace(/&lt;/g, '<')
+		.replace(/&gt;/g, '>')
+		.replace(/&quot;/g, '"')
+		.replace(/&apos;/g, "'")
+		.replace(/&#(\d+);/g, (_, code) => String.fromCharCode(Number(code)))
+		.replace(/&amp;/g, '&');
+}
+
+/** "Yoon, Nicola (1972-....). Auteur du texte" → "Nicola Yoon" */
+function formatBnfPerson(value: string): string {
+	const name = value.replace(/\s*\([^)]*\)/g, '').replace(/\.\s*[A-ZÀ-Ý][^.]*$/, '').trim();
+	const [last, first] = name.split(/,\s*/);
+	return first ? `${first} ${last}` : last;
+}
+
+/**
+ * Catalogue général de la BnF (API SRU, gratuite, sans clé). Recherche
+ * exacte par ISBN, et tout livre publié en France y est déposé (dépôt
+ * légal) — donne aussi le vrai titre d'un tome là où Google Books/Open
+ * Library se contentent parfois du nom de la série ("Les royaumes de feu"
+ * au lieu de "Les flammes de l'espoir"). Pas de couverture.
+ */
+async function lookupBnfIsbn(isbn: string): Promise<BookInfo | null> {
+	try {
+		const query = encodeURIComponent(`bib.isbn all "${normalizeIsbn(isbn)}"`);
+		const response = await fetch(
+			`https://catalogue.bnf.fr/api/SRU?version=1.2&operation=searchRetrieve&query=${query}&recordSchema=dublincore&maximumRecords=3`
+		);
+		if (!response.ok) return null;
+		const xml = await response.text();
+		const wanted = isbnVariants(isbn);
+		const field = (record: string, name: string) =>
+			[...record.matchAll(new RegExp(`<dc:${name}>([^<]*)</dc:${name}>`, 'g'))].map((m) => decodeXmlEntities(m[1]).trim());
+		const record = xml.split(/<srw:record>/).slice(1).find((r) =>
+			field(r, 'identifier').some((id) => id.startsWith('ISBN') && wanted.has(normalizeIsbn(id.slice(4))))
+		);
+		if (!record) return null;
+		// "Titre / Auteur ; traduit par..." → "Titre"
+		const title = field(record, 'title')[0]?.split(' / ')[0].replace(/\s*\[[^\]]*\]/g, '').trim();
+		if (!title) return null;
+		const creators = field(record, 'creator');
+		const authors = creators.filter((c) => /Auteur/i.test(c));
+		return {
+			title,
+			author: (authors.length ? authors : creators).map(formatBnfPerson).join(', ') || null,
+			publisher: field(record, 'publisher')[0]?.replace(/\s*\([^)]*\)\s*$/, '') || null,
+			cover: null,
+		};
+	} catch {
+		return null;
+	}
+}
+
+/**
+ * Titre/auteur(s)/éditeur/couverture d'un livre par ISBN : BnF et Google
+ * Books interrogés en parallèle. Le texte de la BnF est prioritaire (exact
+ * et plus précis pour les livres français), Google Books complète la
+ * couverture et prend le relais pour les livres hors dépôt légal français
+ * (ex. Calligram, éditeur suisse de "Max et Lili"). Filet de sécurité côté
+ * serveur pour quand Open Library (appelé directement par le navigateur)
+ * ne connaît pas le livre. Best-effort comme /product-lookup : jamais
+ * d'erreur dure. Un 429 Google Books sans résultat BnF est signalé via
+ * `quotaExceeded` plutôt que traité comme "livre inconnu".
+ */
 async function handleBookLookup(url: URL, env: Env, headers: HeadersInit): Promise<Response> {
 	const jsonHeaders = { ...headers, 'Content-Type': 'application/json' };
 	const isbn = url.searchParams.get('isbn')?.trim();
@@ -302,62 +402,17 @@ async function handleBookLookup(url: URL, env: Env, headers: HeadersInit): Promi
 		return new Response(JSON.stringify(cached), { headers: jsonHeaders });
 	}
 
-	if (!env.GOOGLE_BOOKS_API_KEY) {
-		return new Response(JSON.stringify(empty), { headers: jsonHeaders });
+	const [bnf, google] = await Promise.all([lookupBnfIsbn(isbn), lookupGoogleBooksIsbn(isbn, env)]);
+	const fromGoogle = google === 'quota' ? null : google;
+	const result = bnf
+		? { ...bnf, author: bnf.author ?? fromGoogle?.author ?? null, publisher: bnf.publisher ?? fromGoogle?.publisher ?? null, cover: fromGoogle?.cover ?? null }
+		: fromGoogle;
+	if (!result) {
+		const body = google === 'quota' ? { ...empty, quotaExceeded: true, message: FREE_QUOTA_MESSAGE } : empty;
+		return new Response(JSON.stringify(body), { headers: jsonHeaders });
 	}
-
-	try {
-		const apiUrl = `https://www.googleapis.com/books/v1/volumes?q=isbn:${encodeURIComponent(isbn)}&key=${env.GOOGLE_BOOKS_API_KEY}`;
-		let response = await fetch(apiUrl);
-		if (!response.ok) response = await fetch(apiUrl);
-		if (!response.ok) response = await fetch(apiUrl);
-		if (response.status === 429) {
-			return new Response(JSON.stringify({ ...empty, quotaExceeded: true, message: FREE_QUOTA_MESSAGE }), { headers: jsonHeaders });
-		}
-		if (!response.ok) {
-			return new Response(JSON.stringify(empty), { headers: jsonHeaders });
-		}
-		const data = (await response.json()) as {
-			items?: {
-				volumeInfo?: {
-					title?: string;
-					authors?: string[];
-					publisher?: string;
-					imageLinks?: Record<string, string>;
-					industryIdentifiers?: { type?: string; identifier?: string }[];
-				};
-			}[];
-		};
-		// `q=isbn:` n'est PAS une recherche exacte : quand l'ISBN demandé est
-		// absent de Google Books, l'API renvoie quand même un livre voisin
-		// (même éditeur/collection — constaté avec des ISBN "Max et Lili"
-		// volontairement invalides qui ressortaient comme un autre tome). On
-		// ne garde donc que le résultat dont les identifiants contiennent
-		// vraiment l'ISBN scanné.
-		const wanted = isbnVariants(isbn);
-		const info = data.items
-			?.map((item) => item.volumeInfo)
-			.find((v) => v?.industryIdentifiers?.some((id) => wanted.has(normalizeIsbn(id.identifier || ''))));
-		if (!info?.title) {
-			return new Response(JSON.stringify(empty), { headers: jsonHeaders });
-		}
-		const cover =
-			(info.imageLinks?.extraLarge || info.imageLinks?.large || info.imageLinks?.medium || info.imageLinks?.thumbnail || null)
-				?.replace('http://', 'https://') || null;
-		const result = {
-			title: info.title,
-			author: (info.authors || []).join(', ') || null,
-			publisher: info.publisher || null,
-			cover,
-		};
-		await writeLookupCache(env.LOOKUP_CACHE_KV, cacheKey, result);
-		return new Response(
-			JSON.stringify(result),
-			{ headers: jsonHeaders }
-		);
-	} catch {
-		return new Response(JSON.stringify(empty), { headers: jsonHeaders });
-	}
+	await writeLookupCache(env.LOOKUP_CACHE_KV, cacheKey, result);
+	return new Response(JSON.stringify(result), { headers: jsonHeaders });
 }
 
 /**
